@@ -15,3 +15,6 @@ ssh-keygen -t rsa
 
 ```
 
+# gitlab branch分支自动发布
+
+![1552059257157](assets\1552059257157.png)需要进行如上的配置，账号使用ssh方式。
