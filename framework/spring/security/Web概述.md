@@ -36,7 +36,7 @@ public class FilterChainProxy extends GenericFilterBean {
 }
 ```
 
-**SecurityFilterChain** 的定义如下：
+## SecurityFilterChain
 
 ```java
 public final class DefaultSecurityFilterChain implements SecurityFilterChain {
@@ -89,8 +89,10 @@ public class SecurityContextPersistenceFilter extends GenericFilterBean {
 
 ## ConcurrentSessionFilter
 
+==这个估计用的不多，因为Session处理一般都会集成到`SecurityContextPersistenceFilter`中进行了==。
+
 ```java
-// Session处理Filter，检测当前请求对应的Session是否过期，如果实现则进行登出处理并发布相应事件，如果未过期则刷新其最后更新时间，防止Session过期。
+// Session处理Filter，检测当前请求对应的Session是否过期，如果过期则进行登出处理并发布相应事件，如果未过期则刷新其最后更新时间，防止Session过期。
 public class ConcurrentSessionFilter extends GenericFilterBean {
     // Session存储接口
     private final SessionRegistry sessionRegistry;
@@ -100,6 +102,73 @@ public class ConcurrentSessionFilter extends GenericFilterBean {
 	private SessionInformationExpiredStrategy sessionInformationExpiredStrategy;
 }
 ```
+
+## Authentication mechanism
+
+### AbstractAuthenticationProcessingFilter
+
+AbstractAuthenticationProcessingFilter` 是大部分认证机制的 filter 基类，它提供了身份认真的通用流程。
+
+```java
+public abstract class AbstractAuthenticationProcessingFilter extends GenericFilterBean
+		implements ApplicationEventPublisherAware, MessageSourceAware {
+    // Spring事件发布器
+	protected ApplicationEventPublisher eventPublisher;
+	// Authentication details生成器
+	protected AuthenticationDetailsSource<HttpServletRequest, ?> authenticationDetailsSource = new WebAuthenticationDetailsSource();
+	
+	// 身份认证管理器，身份认证的实际执行者，内部维护了多个AuthenticationProvider
+	private AuthenticationManager authenticationManager;
+	// remember-me服务，默认不提供remember-me服务。可以通过设置该值来启用remember-me服务
+	private RememberMeServices rememberMeServices = new NullRememberMeServices();
+	// 身份认证url匹配器，只有满足该匹配器的请求才会被判定为登录请求
+	private RequestMatcher requiresAuthenticationRequestMatcher;
+	// 身份认证成功后是否继续执行FilterChain中的其它Filter，默认不执行
+	private boolean continueChainBeforeSuccessfulAuthentication = false;
+	// 登录session处理策略
+	private SessionAuthenticationStrategy sessionStrategy = new NullAuthenticatedSessionStrategy();
+	// 还未看到使用的地方
+	private boolean allowSessionCreation = true;
+	
+	// 身份认证成功处理器
+	private AuthenticationSuccessHandler successHandler = new SavedRequestAwareAuthenticationSuccessHandler();
+	// 身份认证失败处理器
+	private AuthenticationFailureHandler failureHandler = new SimpleUrlAuthenticationFailureHandler();
+	
+	
+	// 通过请求获取Authentication，由子类实现不同模式的身份认证过程
+	public abstract Authentication attemptAuthentication(HttpServletRequest request,
+			HttpServletResponse response) throws AuthenticationException, IOException, ServletException;
+}
+```
+
+- 整合了`RememberMeService`：可以启用remember-me服务。
+- 整合了`SessionAuthenticationStrategy`：可以对Session进行处理，特别是限制多端登录。
+
+### UsernamePasswordAuthenticationFilter
+
+```java
+public class UsernamePasswordAuthenticationFilter extends AbstractAuthenticationProcessingFilter {
+    // 用户名默认参数名称
+    public static final String SPRING_SECURITY_FORM_USERNAME_KEY = "username";
+    // 密码默认参数名称
+	public static final String SPRING_SECURITY_FORM_PASSWORD_KEY = "password";
+    
+    // 用户名参数名称
+    private String usernameParameter = SPRING_SECURITY_FORM_USERNAME_KEY;
+    // 密码参数名称
+	private String passwordParameter = SPRING_SECURITY_FORM_PASSWORD_KEY;
+    // 是否限制只能通过POST进行登录
+	private boolean postOnly = true;
+    
+    // 该filter默认监听 /login 请求
+    public UsernamePasswordAuthenticationFilter() {
+		super(new AntPathRequestMatcher("/login", "POST"));
+	}
+}
+```
+
+
 
 ## SecurityContextHolderAwareRequestFilter
 
@@ -230,7 +299,7 @@ public abstract class AbstractRememberMeServices implements RememberMeServices, 
     // 生成的 RememberMeAuthenticationToken 中的key值，需要与 RememberMeAuthenticationProvider 中的key值相对应。
     private String key;
     
-    // 目前没有使用
+    // UserDetails服务，通过userName获取UserDetails，由子类使用
     private UserDetailsService userDetailsService;
     // 用户账号和凭据有效性检查器
 	private UserDetailsChecker userDetailsChecker = new AccountStatusUserDetailsChecker();
@@ -250,7 +319,7 @@ public abstract class AbstractRememberMeServices implements RememberMeServices, 
 
 ==这里需要着重说明的是`key`值，它必须与 `RememberMeAuthenticationProvider` 中的 `key` 值相对应，否则就算这里可以成功创建 `RememberMeAuthenticationToken` 也无法通过 `AuthenticationManager` 的身份认证。==
 
-SpringSecurity默认提供了两种实现
+SpringSecurity默认提供了两种实现，都是先从请求中解析出remember-me token，从而获取到userName，然后根据userName通过UserDetailsService获取UserDetails。
 
 - PersistentTokenBasedRememberMeServices：依赖于`PersistentTokenRepository`来对remember-me信息进行存储，生成的remember-me token格式为 *series:tokenValue*。
 - TokenBasedRememberMeServices：直接将 remember-me信息全部存储在cookie中，生成的remember-me token 格式为 *username:expireTime:signatureValue*
@@ -287,7 +356,7 @@ public class ExceptionTranslationFilter extends GenericFilterBean {
 }
 ```
 
-这里是它的最主要逻辑
+它主要是针对 `FilterSecurityInterceptor` 中抛出的异常进行处理
 
 - 如果是身份认证失败或者身份认证成功但是授权验证失败（且身份认证为匿名或remember-me认证），则调用 `AuthenticationEntryPoint` 进入登录入口。
 - 否则直接调用 `AccessDeniedHandler` 进行授权失败处理。
@@ -318,5 +387,33 @@ public class ExceptionTranslationFilter extends GenericFilterBean {
 			}
 		}
 	}
+```
+
+## FilterSecurityInterceptor
+
+前面介绍的基本上都是关于身份认证的，而 `FilterSecurityInterceptor` 是处理用户授权的。它自身没有提供太多功能，只是实现了 servlet filter，可以将用户授权拦截器加入到 Security Filter Chain 中。
+
+```java
+public class FilterSecurityInterceptor extends AbstractSecurityInterceptor implements
+		Filter {
+    private static final String FILTER_APPLIED = "__spring_security_filterSecurityInterceptor_filterApplied";
+    
+    // 安全元数据来源
+    private FilterInvocationSecurityMetadataSource securityMetadataSource;
+	private boolean observeOncePerRequest = true;
+}
+```
+
+## LogoutFilter
+
+```java
+public class LogoutFilter extends GenericFilterBean {
+    // logout请求url匹配器
+    private RequestMatcher logoutRequestMatcher;
+    // logout处理器，CompositeLogoutHandler实例，将外部提供的所有handler都放入其中
+	private final LogoutHandler handler;
+    // logout成功处理器
+	private final LogoutSuccessHandler logoutSuccessHandler;
+}
 ```
 
