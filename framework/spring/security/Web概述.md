@@ -60,8 +60,39 @@ public final class DefaultSecurityFilterChain implements SecurityFilterChain {
 
 # Filter Ordering
 
+请参照 `HttpSecurityBuilder#addFilter` 方法中说明的 Filter 顺序。且只能向 `SecurityFilterChain` 中添加下列的 Filter 或 子类。
+
+- ChannelProcessingFilter
+- ConcurrentSessionFilter
+- SecurityContextPersistenceFilter
+- LogoutFilter
+- X509AuthenticationFilter
+- AbstractPreAuthenticatedProcessingFilter
+- CasAuthenticationFilter
+- UsernamePasswordAuthenticationFilter
+- ConcurrentSessionFilter
+- OpenIDAuthenticationFilter
+- org.springframework.security.web.authentication.ui.DefaultLoginPageGeneratingFilter
+- org.springframework.security.web.authentication.ui.DefaultLogoutPageGeneratingFilter
+- ConcurrentSessionFilter
+- DigestAuthenticationFilter
+- org.springframework.security.oauth2.server.resource.web.BearerTokenAuthenticationFilter
+- BasicAuthenticationFilter
+- RequestCacheAwareFilter
+- SecurityContextHolderAwareRequestFilter
+- JaasApiIntegrationFilter
+- RememberMeAuthenticationFilter
+- AnonymousAuthenticationFilter
+- SessionManagementFilter
+- ExceptionTranslationFilter
+- FilterSecurityInterceptor
+- SwitchUserFilter
+
+==更详细的顺序可以参照 `FilterComparator` 中的定义==。下面是对其中的一些 Filter 进行的简要说明。
+
 - `ChannelProcessingFilter`, because it might need to redirect to a different protocol
 - `SecurityContextPersistenceFilter`, so a `SecurityContext` can be set up in the `SecurityContextHolder` at the beginning of a web request, and any changes to the `SecurityContext` can be copied to the `HttpSession` when the web request ends (ready for use with the next web request)
+- `SessionManagementFilter`, session management.
 - `ConcurrentSessionFilter`, because it uses the `SecurityContextHolder` functionality and needs to update the `SessionRegistry` to reflect ongoing requests from the principal
 - Authentication processing mechanisms - `UsernamePasswordAuthenticationFilter`, `CasAuthenticationFilter`, `BasicAuthenticationFilter` etc - so that the `SecurityContextHolder` can be modified to contain a valid `Authentication` request token
 - The `SecurityContextHolderAwareRequestFilter`, if you are using it to install a Spring Security aware `HttpServletRequestWrapper` into your servlet container
@@ -417,3 +448,10 @@ public class LogoutFilter extends GenericFilterBean {
 }
 ```
 
+# Additional Filters
+
+这些filter不经常使用，可以作为了解。
+
+## DefaultLoginPageGeneratingFilter
+
+默认的登录页生成Filter，当不存在 `AuthenticationEntryPoint` 时，默认会添加该Filter，同时还会添加另外一个Filter -> `DefaultLogoutPageGeneratingFilter`。
