@@ -1,0 +1,1 @@
+与 `SpringCloud` 的集成除了 `spring-cloud-stream-binder-rocketmq` 中的代码外，主要就是
