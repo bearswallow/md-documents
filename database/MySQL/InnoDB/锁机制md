@@ -1,0 +1,368 @@
+# 概述
+
+数据库系统使用锁是为了支持对共享资源进行并发访问，提供数据的完整性和一致性。
+
+|          |                           lock                            |                            latch                             |
+| :------: | :-------------------------------------------------------: | :----------------------------------------------------------: |
+|   对象   |                           事务                            |                             线程                             |
+|   保护   |                        数据库内容                         |                         内存数据结构                         |
+| 持续时间 |                       整个事务过程                        |                           临界资源                           |
+|   模式   |                    行锁、表锁、意向锁                     |                        读写锁、互斥量                        |
+|   死锁   | 通过 `wait-for graph`、`timeout` 等机制进行死锁检测与处理 | 无死锁检测与处理机制。仅通过应用程序加锁的顺序保证无死锁的情况发生 |
+|  存在于  |                  Lock Manager 的哈希表中                  |                     每个数据结构的对象中                     |
+
+# 查看命令
+
+用户可以通过命令
+
+```mysql
+SHOW ENGINE INNODB STATUS;
+```
+
+或者查看 `information_schema` 架构下的表 `INNODB_TRX`、`INNODB_LOCKS`、`INNODB_LOCK_WAITS` 来观察锁的信息。
+
+# 锁的类型
+
+- 行级锁
+  - 共享锁（S Lock），允许事务读取一行数据。
+  - 排他锁（X Lock），允许事务删除或更新一行数据。
+- 表锁（意向锁）：设计目的主要是为了一个事务中揭示下一行将被请求的锁类型。
+  - 意向共享锁（IS Lock），事务想要获得一张表中某几行的共享锁。
+  - 意向排他锁（IX Lock），事务想要获得一张表中某几行的排他锁。
+
+## 意向锁
+
+- 意向锁不会阻塞除全表扫意外的任何请求。
+- 意向锁将锁定的对象分为多个层次，意味着事务希望在更细粒度上进行加锁。
+
+==如果需要对页上的记录 r 进行上 X 锁，那么分别需要对数据库、表、页上意向锁 IX，最后对记录 r 上 X 锁。==
+
+## 各种锁的兼容性
+
+|      | IS     | IX     | S      | X      |
+| ---- | ------ | ------ | ------ | ------ |
+| IS   | 兼容   | 兼容   | 兼容   | 不兼容 |
+| IX   | 兼容   | 兼容   | 不兼容 | 不兼容 |
+| S    | 兼容   | 不兼容 | 兼容   | 不兼容 |
+| X    | 不兼容 | 不兼容 | 不兼容 | 不兼容 |
+
+==X 锁与所有锁都不兼容；IX 锁与 S、X 锁不兼容==
+
+# 一致性非锁定读
+
+![非锁定一致性读](E:\git-local\own\md-documents\database\MySQL\InnoDB\assets\非锁定一致性读.jpg)
+
+一致性非锁定读是指 InnoDB 存储引擎通过`多版本并发控制`（`MVCC`）的方式来读取当前执行时间数据库中行的数据。当读取的行正在执行 `DELETE` 或 `UPDATE` 操作，读取操作不会等待行上锁的释放，而是直接取读取行的一个快照数据。
+
+- 快照数据是指该行的之前版本的数据，是通过 `undo` 段来完成。
+- 一致性非锁定读机制极大地提高了数据库的并发性。
+
+在不同的事务隔离级别下，快照数据的定义不尽相同。
+
+- `READ COMMITTED`：一致性非锁定读总是读取行的最新版本，如果行被锁定则读取该行的最新一份快照数据。
+- `REPEATABLE READ`：一致性非锁定读总是读取事务开始时的行数据版本。
+
+# 一致性锁定读
+
+- `SELECT ... FOR UPDATE`：对读取的行记录加一个 X 锁。
+- `SELECT ... LOCK IN SHARE MODE`：对读取的行记录加一个 S 锁。
+
+# 特殊锁定
+
+- 自增长列的锁定模式
+  - 0：`MySQL5.1.22` 版本之前通过表锁的 `AUTO-INC Locking` 方式。
+  - 1：对于 `simple inserts` 会用互斥量去对内存中的计数器进行累加的操作；对于 `bulk inserts` 还是使用 `AUTO-INC Locking` 。
+    - 基于 `statement-based` 方式的 `replication` 还是能很好地工作。
+    - 如果已经使用 `AUTO-INC Locking` 方式去产生自增长的值，而这时需要再进行 `simple inserts` 的操作时，还是需要等待 `AUTO-INC Locking` 的释放。
+  - 2：对于所有 `insert-like` 自增长值的产生都是通过互斥量完成。
+    - 因为并发插入的存在，自增长的值可能不是连续的。
+    - 基于 `Statement-Base Replication` 会出现问题，需要使用 `row-base replication`。
+- 外键和锁
+  - 对于外键值的插入或更新，首先需要查询附表中的记录，且使用一致性锁定读的方式 `SELECT... LOCK IN SHARE MODE` 来为附表中相应的记录上 S 锁。
+
+# 行锁算法
+
+`InnoDB` 存储引擎有 3 种行锁的算法
+
+- `Record Lock`：单个行记录上的锁。
+  - 总是去锁住索引记录，如果 `InnoDB` 存储引擎表没有任何设置任何一个索引，那么这时 `InnoDB` 存储引擎会使用隐式的主键来进行锁定。
+- `Gap Lock`：间隙锁，锁定一个范围，但不包含记录本身。
+- `Next-Key Lock`：`Gap Lock` + `Record Lock`，锁定一个范围，并且锁定记录本身。
+  - 其目的是为了解决 `幻读` 问题。
+  - 查询的列是唯一索引的情况下 `Next-Key Lock` 会降级为 `Record Lock`。
+
+
+
+## 举例
+
+```mysql
+CREATE TABLE tbl_next_locking (a INT, b INT, c INT, d INT, e INT,
+                               PRIMARY KEY(a), KEY(b), KEY(d, e));
+INSERT INTO tbl_next_locking VALUES(1, 1, 3, 5, 6),
+			  					   (2, 3, 4, 8, 9),
+			  					   (3, 6, 6, 2, 3),
+			  					   (4, 4, 8, 5, 1),
+			  					   (7, 8, 1, 4, 7),
+			  					   (10, 9, 11, 12, 22);
+```
+
+### 通过主键查询
+
+- 单个键值（存在）
+
+  ```mysql
+  BEGIN;
+  SELECT * FROM tbl_next_locking WHERE a = 2 FOR UPDATE;
+  ```
+
+  | lock_mode | lock_type | lock_index | lock_data |
+  | :-------: | :-------: | :--------: | :-------: |
+  |     X     |  RECORD   |  PRIMARY   |     2     |
+
+  ```mysql
+  -- 不需要等待锁
+  INSERT INTO tbl_next_locking VALUES(5, 2, 2, 4, 7);
+  UPDATE tbl_next_locking SET b = 3 WHERE a = 4;
+  
+  -- 需要等待锁
+  UPDATE tbl_next_locking SET b = 3 WHERE a = 2;
+  ```
+
+- 单个键值（不存在）
+
+  ```mysql
+  BEGIN;
+  SELECT * FROM tbl_next_locking WHERE a = 8 FOR UPDATE;
+  ```
+
+  | lock_mode | lock_type | lock_index | lock_data |
+  | :-------: | :-------: | :--------: | :-------: |
+  |    GAP    |  RECORD   |  PRIMARY   |  (7, 10)  |
+
+  ```mysql
+  -- 不需要等待锁
+  INSERT INTO tbl_next_locking VALUES(11, 5, 11, 12, 22);
+  INSERT INTO tbl_next_locking VALUES(6, 5, 11, 12, 22);
+  UPDATE tbl_next_locking SET b = 5 WHERE a = 7;
+  UPDATE tbl_next_locking SET b = 5 WHERE a = 10;
+  
+  -- 需要等待锁
+  INSERT INTO tbl_next_locking VALUES(9, 5, 11, 12, 22);
+  INSERT INTO tbl_next_locking VALUES(8, 5, 11, 12, 22);
+  ```
+
+- 多个键值（存在）
+
+  ```mysql
+  BEGIN;
+  SELECT * FROM tbl_next_locking WHERE a IN (2, 4) FOR UPDATE;
+  ```
+
+  | lock_mode | lock_type | lock_index | lock_data |
+  | :-------: | :-------: | :--------: | :-------: |
+  |     X     |  RECORD   |  PRIMARY   |     2     |
+  |     X     |  RECORD   |  PRIMARY   |     4     |
+
+- 多个键值（不存在）
+
+  ```mysql
+  BEGIN;
+  SELECT * FROM tbl_next_locking WHERE a IN (6, 8) FOR UPDATE;
+  ```
+
+  | lock_mode | lock_type | lock_index | lock_data |
+  | :-------: | :-------: | :--------: | :-------: |
+  |    GAP    |  RECORD   |  PRIMARY   |  (4, 7)   |
+  |    GAP    |  RECORD   |  PRIMARY   |  (7, 10)  |
+
+- 下边界（边界不存在）
+
+  ```mysql
+  BEGIN;
+  SELECT * FROM tbl_next_locking WHERE a >= 8 FOR UPDATE;
+  ```
+
+  | lock_mode | lock_type | lock_index | lock_data |
+  | :-------: | :-------: | :--------: | :-------: |
+  |    GAP    |  RECORD   |  PRIMARY   |  (7, 10)  |
+  |     X     |  RECORD   |  PRIMARY   |    10     |
+  |    GAP    |  RECORD   |  PRIMARY   | (10, +∞)  |
+
+- 下边界（边界存在，不含边界）
+
+  ```mysql
+  BEGIN;
+  SELECT * FROM tbl_next_locking WHERE a > 7 FOR UPDATE;
+  ```
+
+  | lock_mode | lock_type | lock_index | lock_data |
+  | :-------: | :-------: | :--------: | :-------: |
+  |    GAP    |  RECORD   |  PRIMARY   |  (7, 10)  |
+  |     X     |  RECORD   |  PRIMARY   |    10     |
+  |    GAP    |  RECORD   |  PRIMARY   | (10, +∞)  |
+
+- 下边界（边界存在，含边界）
+
+  ```mysql
+  BEGIN;
+  SELECT * FROM tbl_next_locking WHERE a >= 7 FOR UPDATE;
+  ```
+
+  | lock_mode | lock_type | lock_index | lock_data |
+  | :-------: | :-------: | :--------: | :-------: |
+  |     X     |  RECORD   |  PRIMARY   |     7     |
+  |    GAP    |  RECORD   |  PRIMARY   |  (7,10)   |
+  |     X     |  RECORD   |  PRIMARY   |    10     |
+  |    GAP    |  RECORD   |  PRIMARY   | (10, +∞)  |
+
+- 有界范围（边界未超过最大键）
+
+  ```mysql
+  BEGIN;
+  SELECT * FROM tbl_next_locking WHERE a >= 6 AND a <= 9 FOR UPDATE;
+  ```
+
+  | lock_mode | lock_type | lock_index | lock_data |
+  | :-------: | :-------: | :--------: | :-------: |
+  |    GAP    |  RECORD   |  PRIMARY   |  (4, 7)   |
+  |     X     |  RECORD   |  PRIMARY   |     7     |
+  |    GAP    |  RECORD   |  PRIMARY   |  (7,10)   |
+
+- 有界范围（边界超过最大键）
+
+  ```mysql
+  BEGIN;
+  SELECT * FROM tbl_next_locking WHERE a >= 6 AND a <= 11 FOR UPDATE;
+  ```
+
+  | lock_mode | lock_type | lock_index | lock_data |
+  | :-------: | :-------: | :--------: | :-------: |
+  |    GAP    |  RECORD   |  PRIMARY   |  (4, 7)   |
+  |     X     |  RECORD   |  PRIMARY   |     7     |
+  |    GAP    |  RECORD   |  PRIMARY   |  (7,10)   |
+  |     X     |  RECORD   |  PRIMARY   |    10     |
+  |    GAP    |  RECORD   |  PRIMARY   | (10, +∞)  |
+
+### 通过单个非唯一索引查询
+
+==通过单个非唯一索引查询的很多加锁结果都与预期的相去甚远，就好像进行了全表扫描，目前还不清楚是为什么？==
+
+- 单个键值（存在）
+
+  ```mysql
+  BEGIN;
+  SELECT * FROM tbl_next_locking WHERE b = 6 FOR UPDATE;
+  ```
+
+  |   lock_mode   | lock_type | lock_index | lock_data |
+  | :-----------: | :-------: | :--------: | :-------: |
+  |       X       |  RECORD   |  PRIMARY   |     3     |
+  |       X       |  RECORD   |     b      |   6(3)    |
+  | Next-Key Lock |  RECORD   |     b      |   (4,6]   |
+  |      GAP      |  RECORD   |     b      |   (6,7)   |
+
+  ```mysql
+  -- PRIMARY索引上的X锁冲突
+  UPDATE tbl_next_locking SET c = 16 WHERE a = 3;
+  -- b索引上的X锁冲突
+  UPDATE tbl_next_locking SET c = 16 WHERE b = 6;
+  -- b索引上的Next-Key Lock锁冲突
+  INSERT INTO tbl_next_locking VALUES(24, 6, 11, 12, 22);
+  -- b索引上的Next-Key Lock锁冲突
+  INSERT INTO tbl_next_locking VALUES(24, 5, 11, 12, 22);
+  -- b索引上的GAP锁冲突
+  INSERT INTO tbl_next_locking VALUES(24, 7, 11, 12, 22);
+  ```
+
+  ==按理说插入一条 b=6 的数据应该会触发 `Next-Lock`（范围：(4,6]），但是实际试验结果是触发了 `GAP` 锁（范围：(6, 7)）？==
+
+- 单个键值（不存在）
+
+  ```mysql
+  BEGIN;
+  SELECT * FROM tbl_next_locking WHERE b = 5 FOR UPDATE;
+  ```
+
+  | lock_mode | lock_type | lock_index | lock_data |
+  | :-------: | :-------: | :--------: | :-------: |
+  |    GAP    |  RECORD   |     b      |   (4,6)   |
+
+- 多个键值（存在）
+
+  ```mysql
+  BEGIN;
+  SELECT * FROM tbl_next_locking WHERE b IN (3,6) FOR UPDATE;
+  ```
+
+  | lock_mode | lock_type | lock_index | lock_data |
+  | :-------: | :-------: | :--------: | :-------: |
+  |     X     |  RECORD   |  PRIMARY   |     2     |
+  |     X     |  RECORD   |  PRIMARY   |     3     |
+  |     X     |  RECORD   |  PRIMARY   |    10     |
+  |    GAP    |  RECORD   |  PRIMARY   |  (-∞,+∞)  |
+
+- 下边界（边界存在，含边界）
+
+  ```mysql
+  BEGIN;
+  SELECT * FROM tbl_next_locking WHERE b >= 6 FOR UPDATE;
+  ```
+
+  | lock_mode | lock_type | lock_index | lock_data |
+  | :-------: | :-------: | :--------: | :-------: |
+  |     X     |  RECORD   |  PRIMARY   |     3     |
+  |     X     |  RECORD   |  PRIMARY   |     7     |
+  |     X     |  RECORD   |  PRIMARY   |    10     |
+  |    GAP    |  RECORD   |  PRIMARY   |  (-∞,+∞)  |
+
+- 下边界（边界存在，不含边界）
+
+  ```mysql
+  BEGIN;
+  SELECT * FROM tbl_next_locking WHERE b > 6 FOR UPDATE;
+  ```
+
+  | lock_mode | lock_type | lock_index | lock_data |
+  | :-------: | :-------: | :--------: | :-------: |
+  |     X     |  RECORD   |  PRIMARY   |     7     |
+  |    GAP    |  RECORD   |  PRIMARY   |  [6,+∞)   |
+
+- 有界区间（边界存在，含边界）
+
+  ```mysql
+  BEGIN;
+  SELECT * FROM tbl_next_locking WHERE b >= 3 AND b <= 6 FOR UPDATE;
+  ```
+
+  | lock_mode | lock_type | lock_index | lock_data |
+  | :-------: | :-------: | :--------: | :-------: |
+  |     X     |  RECORD   |  PRIMARY   |   全部    |
+  |    GAP    |  RECORD   |  PRIMARY   |  (-∞,+∞)  |
+
+**对于非唯一索引键查询锁住的内容包含**
+
+- 满足条件的行记录的聚集索引加上 `Record Lock`。
+- 对于非唯一索引，加上 `Next-Key Lock`。
+- 对于非唯一索引下一个键值，加上 `GAP Lock`。
+
+### 全表扫描
+
+无法利用索引的查询都会进行全表扫描，则所有记录都会被锁住，不能进行任何 `INSERT`、`UPDATE` 和 `DELETE` 操作。
+
+# 锁问题
+
+- 脏读：指的是在不同的事务下，当前事务可以读到另外事务未提交的数据。
+  - 通过 X 锁解决。
+- 不可重复读：在一个事务内两次读取到的同一条数据不一样的情况。
+  - 通过 `MVCC` 解决。
+- 幻读：在一个事务内两次读取同一个范围内的数据条数不一致的情况。
+  - 通过 `Next-Key Lock` 解决。
+- 丢失更新：多个用户对同一条数据进行修改，先提交的数据被后提交数据覆盖的情况。
+  - 通过 `SELECT ... FOR UPDATE` 给获取的数据加上 X 锁，可以有效防止多个用户对同一条数据修改导致先提交的用户数据被后提交的用户数据覆盖而丢失更新。
+- 死锁：指两个或两个以上的事务再执行过程中，因争夺锁资源而造成的一种相互等待的现象。
+  - 回滚方式：不要有等待，将任何等待都转化为回滚，并且事务重新开始。
+    - 在并发情况下，可能导致并发性能的下降，甚至任何一个事务都不能进行。
+  - 超时方式：当两个事务相互等待时，当一个等待时间超过设置的某一个阈值时，其中一个事务进行回滚，另一个等待的事务就能继续进行。
+    - 改进版本：根据事务的权重来选择回滚的事务。
+  - 主动死锁检测方式：在超时机制之外，普遍采用 `wait-for gragh` 的方式来进行死锁检测。
+    - 在每个事务请求锁并发生等待时都会判断是否存在回路，若存在则有死锁，通常来说 `InnoDB` 存储引擎选择回滚 `undo` 量最小的事务。
