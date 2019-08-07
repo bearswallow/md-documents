@@ -10,7 +10,7 @@ if (null == this.clientConfig.getNamesrvAddr()) {
 this.mQClientAPIImpl.start();
 // Start various schedule tasks
 this.startScheduledTask();
-// Start pull service，从 broker 拉取数据
+// Start pull service，消费者从 broker 拉取数据
 this.pullMessageService.start();
 // Start rebalance service，将消息消费者重新分配，也是定时任务
 this.rebalanceService.start();
