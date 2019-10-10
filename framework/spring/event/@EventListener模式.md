@@ -84,13 +84,17 @@ public class EventListenerMethodProcessor
         // 获取BeanFactory中的所有bean名称，从所有的bean中去解析需要注册到ApplicationContext中的事件监听器
 		String[] beanNames = beanFactory.getBeanNamesForType(Object.class);
         for (String beanName : beanNames) {
-            // ...省略一些判断是否排除的逻辑代码
-            try {
-                // 对通过检查的所有bean进行处理
-                processBean(beanName, type);
-            }
-            catch (Throwable ex) {
-                throw new BeanInitializationException("Failed to process @EventListener annotation on bean with name '" + beanName + "'", ex);
+            if (!ScopedProxyUtils.isScopedTarget(beanName)) {
+                // Spring容器中bean的类型（非Proxy）
+				Class<?> type = null;
+                // ...省略一些判断是否排除的逻辑代码
+                try {
+                    // 对通过检查的所有bean进行处理
+                    processBean(beanName, type);
+                }
+                catch (Throwable ex) {
+                    throw new BeanInitializationException("Failed to process @EventListener annotation on bean with name '" + beanName + "'", ex);
+                }
             }
         }
     }
@@ -224,6 +228,26 @@ public class ApplicationListenerMethodAdapter implements GenericApplicationListe
 				logger.trace("No result object given - no result to handle");
 			}
 		}
+	}
+    
+    @Nullable
+	protected Object[] resolveArguments(ApplicationEvent event) {
+		ResolvableType declaredEventType = getResolvableType(event);
+		if (declaredEventType == null) {
+			return null;
+		}
+		if (this.method.getParameterCount() == 0) {
+			return new Object[0];
+		}
+		Class<?> declaredEventClass = declaredEventType.toClass();
+		if (!ApplicationEvent.class.isAssignableFrom(declaredEventClass) &&
+				event instanceof PayloadApplicationEvent) {
+			Object payload = ((PayloadApplicationEvent) event).getPayload();
+			if (declaredEventClass.isInstance(payload)) {
+				return new Object[] {payload};
+			}
+		}
+		return new Object[] {event};
 	}
     
     protected void handleResult(Object result) {
