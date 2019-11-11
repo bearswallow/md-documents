@@ -1,6 +1,16 @@
-# 注解
+# 流程
 
-## @KafkaListener
+## 注册流程
+
+![MessageListener注册](SpringKafkaConsumer.assets/MessageListener注册.png)
+
+## 启动流程
+
+# 注解及处理
+
+## 注解
+
+### @KafkaListener
 
 完整类名：`org.springframework.kafka.annotation.KafkaListener`。
 
@@ -44,7 +54,7 @@ public @interface KafkaListener {
 - 在方法上注解，则该方法会使用设定的 `KafkaListenerContainerFactory` 来创建 KafkaConsumer。
 - 一个类或方法上可以添加多个 `@KafkaListener` 注解 `@KafkaListeners`。
 
-### @KafkaLisenters
+#### @KafkaLisenters
 
 完整类名：`org.springframework.kafka.annotation.KafkaListeners`。
 
@@ -57,7 +67,7 @@ public @interface KafkaListeners {
 }
 ```
 
-## @KafkaHandler
+### @KafkaHandler
 
 完整类名：`org.springframework.kafka.annotation.KafkaHandler`。
 
@@ -72,7 +82,9 @@ public @interface KafkaHandler {
 
 这只是一个标记注解，配置类上 `@KafkaListener` 一起使用。
 
-## KafkaListenerAnnotationBeanPostProcessor
+## 注解的处理
+
+### KafkaListenerAnnotationBeanPostProcessor
 
 完整类名：`org.springframework.kafka.annotation.KafkaListenerAnnotationBeanPostProcessor`。
 
@@ -97,7 +109,9 @@ public class KafkaListenerAnnotationBeanPostProcessor<K, V>
 }
 ```
 
-### postProcessAfterInitialization方法
+- `endpointRegistry`、`containerFactoryBeanName` 和 `messageHandlerMethodFactory` 可以通过setter设置。
+
+#### postProcessAfterInitialization方法
 
 ```java
 @Override
@@ -130,11 +144,11 @@ public Object postProcessAfterInitialization(final Object bean, final String bea
 }
 ```
 
-#### ==有疑问的地方==
+##### ==有疑问的地方==
 
 - 为什么 `nonAnnotatedClasses` 中只记录类中的方法不含 `@KafkaListener` 注解的类，而不用管类是否包含 `@KafkaListener` 注解。
 
-### processListener方法
+#### processListener方法
 
 在 `processKafkaListener` 和 `processMultiMethodListeners` 中，会对每个 `@KafkaListener` 注解创建一个相应的 `MethodKafkaListenerEndpoint` ，然后调用该方法进行统一处理。
 
@@ -157,7 +171,7 @@ protected void processListener(MethodKafkaListenerEndpoint<?, ?> endpoint, Kafka
 }
 ```
 
-### afterSingletonsInstantiated方法
+#### afterSingletonsInstantiated方法
 
 ```java
 @Override
@@ -171,7 +185,7 @@ public void afterSingletonsInstantiated() {
 }
 ```
 
-## KafkaListenerEndpointRegistrar
+### KafkaListenerEndpointRegistrar
 
 完整类名：`org.springframework.kafka.config.KafkaListenerEndpointRegistrar`。
 
@@ -222,7 +236,7 @@ public class KafkaListenerEndpointRegistrar implements BeanFactoryAware, Initial
 }
 ```
 
-## KafkaListenerEndpointRegistry
+### KafkaListenerEndpointRegistry
 
 完整类名：`org.springframework.kafka.config.KafkaListenerEndpointRegistry`。
 
@@ -249,7 +263,7 @@ public class KafkaListenerEndpointRegistry implements DisposableBean, SmartLifec
         }
     }
     
-    // 当ContextRefreshedEvent事件是否已触发且该container#autoStartup为true时启动
+    // 当ContextRefreshedEvent事件已触发或者该container#autoStartup为true时启动
     private void startIfNecessary(MessageListenerContainer listenerContainer) {
 		if (this.contextRefreshed || listenerContainer.isAutoStartup()) {
 			listenerContainer.start();
@@ -260,7 +274,142 @@ public class KafkaListenerEndpointRegistry implements DisposableBean, SmartLifec
 
 
 
-# MessageHandlerMethodFactory
+# 监听端点
+
+## KafkaListenerEndPoint
+
+完整类名：`org.springframework.kafka.config.KafkaListenerEndpoint`。
+
+```java
+public interface KafkaListenerEndpoint {
+    
+    String getId();
+    // 该EndPoint所在的分组，如果没有在任何一个分组里则返回null。
+    String getGroup();
+    Collection<String> getTopics();
+    Collection<TopicPartitionInitialOffset> getTopicPartitions();
+    Pattern getTopicPattern();
+    // 设置MessageListenerContainer
+    void setupListenerContainer(MessageListenerContainer listenerContainer, MessageConverter messageConverter);
+}
+```
+
+### AbstractKafkaListenerEndpoint
+
+完整类名：`org.springframework.kafka.config.AbstractKafkaListenerEndpoint`。
+
+```java
+public abstract class AbstractKafkaListenerEndpoint<K, V>
+		implements KafkaListenerEndpoint, BeanFactoryAware, InitializingBean {
+    // 会对topics、topicPattern进行SpEL解析
+    private BeanExpressionResolver resolver;
+	private BeanExpressionContext expressionContext;
+    // 消息过滤策略
+    private RecordFilterStrategy<K, V> recordFilterStrategy;
+    private boolean ackDiscarded;
+    // 说明会在该层次进行重试处理
+	private RetryTemplate retryTemplate;
+    // 当所有重试都失败后的回调处理，可以作为fallback处理
+	private RecoveryCallback<? extends Object> recoveryCallback;
+    // 是否进行Kafka消息的批量处理
+	private boolean batchListener;
+    
+    @Override
+	public void afterPropertiesSet() {
+        // 检查topics、topicPattern和topicPartitions之间的关系是否满足限制条件。
+    }
+    
+    // 由子类来确定如何创建MessagingMessageListenerAdapter
+    protected abstract MessagingMessageListenerAdapter<K, V> createMessageListener(MessageListenerContainer container,
+			MessageConverter messageConverter);
+    
+    private void setupMessageListener(MessageListenerContainer container, MessageConverter messageConverter) {
+        // 调用子类实现方法创建MessagingMessageListenerAdapter
+        Object messageListener = createMessageListener(container, messageConverter);
+        // 根据是否存在retryTemplate和recordFilterStrategy以及messageListener类型来创建不同的MessagingMessageListenerAdapter适配器。
+        // 将MessagingMessageListenerAdapter注册进MessageListenerContainer
+        container.setupMessageListener(messageListener);
+    }
+}
+```
+
+#### RecordFilterStrategy
+
+完整类名：`org.springframework.kafka.listener.adapter.RecordFilterStrategy`。
+
+`ConsumerRecord` 过滤策略。在Kafka消息发送给某个@KafkaListener或@KafkaHandler注解的方法之前进行过滤。
+
+```java
+public interface RecordFilterStrategy<K, V> {
+    boolean filter(ConsumerRecord<K, V> consumerRecord);
+}
+```
+
+### MethodKafkaListenerEndpoint
+
+完整类名：`org.springframework.kafka.config.MethodKafkaListenerEndpoint`。
+
+```java
+public class MethodKafkaListenerEndpoint<K, V> extends AbstractKafkaListenerEndpoint<K, V> {
+    private Object bean;
+    // 实际调用的消息处理方法，由@KafkaListener注解的方法
+    private Method method;
+    private MessageHandlerMethodFactory messageHandlerMethodFactory;
+    
+    @Override
+	protected MessagingMessageListenerAdapter<K, V> createMessageListener(MessageListenerContainer container,
+			MessageConverter messageConverter) {
+		Assert.state(this.messageHandlerMethodFactory != null,
+				"Could not create message listener - MessageHandlerMethodFactory not set");
+		MessagingMessageListenerAdapter<K, V> messageListener = createMessageListenerInstance(messageConverter);
+        // configureListenerAdaptor中会创建一个含InvocableHandlerMethod的HandlerAdaptor
+		messageListener.setHandlerMethod(configureListenerAdapter(messageListener));
+		return messageListener;
+	}
+    
+    // 创建含有InvocableHandlerMethod的HandlerAdaptor
+    protected HandlerAdapter configureListenerAdapter(MessagingMessageListenerAdapter<K, V> messageListener) {
+		InvocableHandlerMethod invocableHandlerMethod =
+				this.messageHandlerMethodFactory.createInvocableHandlerMethod(getBean(), getMethod());
+		return new HandlerAdapter(invocableHandlerMethod);
+	}
+    
+    protected MessagingMessageListenerAdapter<K, V> createMessageListenerInstance(MessageConverter messageConverter) {
+        // 根据batchListener的值决定创建BatchMessagingMessageListenerAdapter或者RecordMessagingMessageListenerAdapter。并将类型匹配的MessageConverter设置到MessagingMessageListenerAdapter中。
+    }
+    
+}
+```
+
+### MultiMethodKafkaListenerEndpoint
+
+完整类名：`org.springframework.kafka.config.MultiMethodKafkaListenerEndpoint`。
+
+```java
+public class MultiMethodKafkaListenerEndpoint<K, V> extends MethodKafkaListenerEndpoint<K, V> {
+    private final List<Method> methods;
+    
+    public MultiMethodKafkaListenerEndpoint(List<Method> methods, Object bean) {
+		this.methods = methods;
+		setBean(bean);
+	}
+
+    // 创建含有DelegatingInvocableHandler的HandlerAdaptor
+	@Override
+	protected HandlerAdapter configureListenerAdapter(MessagingMessageListenerAdapter<K, V> messageListener) {
+		List<InvocableHandlerMethod> invocableHandlerMethods = new ArrayList<InvocableHandlerMethod>();
+		for (Method method : this.methods) {
+			invocableHandlerMethods.add(getMessageHandlerMethodFactory()
+					.createInvocableHandlerMethod(getBean(), method));
+		}
+		DelegatingInvocableHandler delegatingHandler =
+				new DelegatingInvocableHandler(invocableHandlerMethods, getBean());
+		return new HandlerAdapter(delegatingHandler);
+	}
+}
+```
+
+## MessageHandlerMethodFactory
 
 完整类名：`org.springframework.messaging.handler.annotation.support.MessageHandlerMethodFactory`。
 
@@ -272,7 +421,7 @@ public interface MessageHandlerMethodFactory {
 }
 ```
 
-## HandlerMethodArgumentResolver
+### HandlerMethodArgumentResolver
 
 完整类名：`org.springframework.messaging.handler.invocation.HandlerMethodArgumentResolver`。
 
@@ -286,7 +435,7 @@ public interface HandlerMethodArgumentResolver {
 }
 ```
 
-### HandlerMethodArgumentResolverComposite
+#### HandlerMethodArgumentResolverComposite
 
 完整类名：`org.springframework.messaging.handler.invocation.HandlerMethodArgumentResolverComposite`。
 
@@ -314,7 +463,7 @@ public class HandlerMethodArgumentResolverComposite implements HandlerMethodArgu
 }
 ```
 
-## DefaultMessageHandlerMethodFactory
+### DefaultMessageHandlerMethodFactory
 
 完整类名：`org.springframework.messaging.handler.annotation.support.DefaultMessageHandlerMethodFactory`。
 
@@ -355,7 +504,7 @@ public class DefaultMessageHandlerMethodFactory
 }
 ```
 
-## KafkaHandlerMethodFactoryAdapter
+### KafkaHandlerMethodFactoryAdapter
 
 完整类名：`org.springframework.kafka.annotation.KafkaListenerAnnotationBeanPostProcessor.KafkaHandlerMethodFactoryAdapter`。
 
@@ -373,146 +522,11 @@ private class KafkaHandlerMethodFactoryAdapter implements MessageHandlerMethodFa
 }
 ```
 
-### ==有疑问的地方==
+#### ==有疑问的地方==
 
 createDefaultMessageHandlerMethodFactory 中做的事情与 DefaultMessageHandlerMethodFactory#initArgumentResolvers 一样，那为什么要这样做呢？
 
-# EndPoint
-
-## KafkaListenerEndPoint
-
-完整类名：`org.springframework.kafka.config.KafkaListenerEndpoint`。
-
-```java
-public interface KafkaListenerEndpoint {
-    
-    String getId();
-    // 该EndPoint所在的分组，如果没有在任何一个分组里则返回null。
-    String getGroup();
-    Collection<String> getTopics();
-    Collection<TopicPartitionInitialOffset> getTopicPartitions();
-    Pattern getTopicPattern();
-    // 设置MessageListenerContainer
-    void setupListenerContainer(MessageListenerContainer listenerContainer, MessageConverter messageConverter);
-}
-```
-
-## AbstractKafkaListenerEndpoint
-
-完整类名：`org.springframework.kafka.config.AbstractKafkaListenerEndpoint`。
-
-```java
-public abstract class AbstractKafkaListenerEndpoint<K, V>
-		implements KafkaListenerEndpoint, BeanFactoryAware, InitializingBean {
-    // 会对topics、topicPattern进行SpEL解析
-    private BeanExpressionResolver resolver;
-	private BeanExpressionContext expressionContext;
-    // 消息过滤策略
-    private RecordFilterStrategy<K, V> recordFilterStrategy;
-    private boolean ackDiscarded;
-    // 说明会在该层次进行重试处理
-	private RetryTemplate retryTemplate;
-    // 当所有重试都失败后的回调处理，可以作为fallback处理
-	private RecoveryCallback<? extends Object> recoveryCallback;
-    // 是否进行Kafka消息的批量处理
-	private boolean batchListener;
-    
-    @Override
-	public void afterPropertiesSet() {
-        // 检查topics、topicPattern和topicPartitions之间的关系是否满足限制条件。
-    }
-    
-    // 由子类来确定如何创建MessagingMessageListenerAdapter
-    protected abstract MessagingMessageListenerAdapter<K, V> createMessageListener(MessageListenerContainer container,
-			MessageConverter messageConverter);
-    
-    private void setupMessageListener(MessageListenerContainer container, MessageConverter messageConverter) {
-        // 调用子类实现方法创建MessagingMessageListenerAdapter
-        Object messageListener = createMessageListener(container, messageConverter);
-        // 根据是否存在retryTemplate和recordFilterStrategy以及messageListener类型来创建不同的MessagingMessageListenerAdapter适配器。
-        // 将MessagingMessageListenerAdapter注册进MessageListenerContainer
-        container.setupMessageListener(messageListener);
-    }
-}
-```
-
-### RecordFilterStrategy
-
-完整类名：`org.springframework.kafka.listener.adapter.RecordFilterStrategy`。
-
-`ConsumerRecord` 过滤策略。在Kafka消息发送给某个@KafkaListener或@KafkaHandler注解的方法之前进行过滤。
-
-```java
-public interface RecordFilterStrategy<K, V> {
-    boolean filter(ConsumerRecord<K, V> consumerRecord);
-}
-```
-
-## MethodKafkaListenerEndpoint
-
-完整类名：`org.springframework.kafka.config.MethodKafkaListenerEndpoint`。
-
-```java
-public class MethodKafkaListenerEndpoint<K, V> extends AbstractKafkaListenerEndpoint<K, V> {
-    private Object bean;
-    // 实际调用的消息处理方法，由@KafkaListener注解的方法
-    private Method method;
-    private MessageHandlerMethodFactory messageHandlerMethodFactory;
-    
-    @Override
-	protected MessagingMessageListenerAdapter<K, V> createMessageListener(MessageListenerContainer container,
-			MessageConverter messageConverter) {
-		Assert.state(this.messageHandlerMethodFactory != null,
-				"Could not create message listener - MessageHandlerMethodFactory not set");
-		MessagingMessageListenerAdapter<K, V> messageListener = createMessageListenerInstance(messageConverter);
-        // configureListenerAdaptor中会创建一个含InvocableHandlerMethod的HandlerAdaptor
-		messageListener.setHandlerMethod(configureListenerAdapter(messageListener));
-		return messageListener;
-	}
-    
-    // 创建含有InvocableHandlerMethod的HandlerAdaptor
-    protected HandlerAdapter configureListenerAdapter(MessagingMessageListenerAdapter<K, V> messageListener) {
-		InvocableHandlerMethod invocableHandlerMethod =
-				this.messageHandlerMethodFactory.createInvocableHandlerMethod(getBean(), getMethod());
-		return new HandlerAdapter(invocableHandlerMethod);
-	}
-    
-    protected MessagingMessageListenerAdapter<K, V> createMessageListenerInstance(MessageConverter messageConverter) {
-        // 根据batchListener的值决定创建BatchMessagingMessageListenerAdapter或者RecordMessagingMessageListenerAdapter。并将类型匹配的MessageConverter设置到MessagingMessageListenerAdapter中。
-    }
-    
-}
-```
-
-## MultiMethodKafkaListenerEndpoint
-
-完整类名：`org.springframework.kafka.config.MultiMethodKafkaListenerEndpoint`。
-
-```java
-public class MultiMethodKafkaListenerEndpoint<K, V> extends MethodKafkaListenerEndpoint<K, V> {
-    private final List<Method> methods;
-    
-    public MultiMethodKafkaListenerEndpoint(List<Method> methods, Object bean) {
-		this.methods = methods;
-		setBean(bean);
-	}
-
-    // 创建含有DelegatingInvocableHandler的HandlerAdaptor
-	@Override
-	protected HandlerAdapter configureListenerAdapter(MessagingMessageListenerAdapter<K, V> messageListener) {
-		List<InvocableHandlerMethod> invocableHandlerMethods = new ArrayList<InvocableHandlerMethod>();
-		for (Method method : this.methods) {
-			invocableHandlerMethods.add(getMessageHandlerMethodFactory()
-					.createInvocableHandlerMethod(getBean(), method));
-		}
-		DelegatingInvocableHandler delegatingHandler =
-				new DelegatingInvocableHandler(invocableHandlerMethods, getBean());
-		return new HandlerAdapter(delegatingHandler);
-	}
-}
-```
-
-# HandlerAdaptor
+## HandlerAdaptor
 
 完整类名：`org.springframework.kafka.listener.adapter.HandlerAdapter`。
 
@@ -529,13 +543,13 @@ public class HandlerAdapter {
 
 `InvocableHandlerMethod` 的优先级更高。
 
-## InvocableHandlerMethod
+### InvocableHandlerMethod
 
 完整类名：`org.springframework.messaging.handler.invocation.InvocableHandlerMethod`。
 
 针对 `@KafkaListener` 注解的单个方法的包装。`MethodKafkaListenerEndpoint` 创建 `MessageListener` 时会创建使用该类型实例创建的 `HandlerAdaptor`。
 
-## DelegatingInvocableHandler
+### DelegatingInvocableHandler
 
 完整类名：`org.springframework.kafka.listener.adapter.DelegatingInvocableHandler`。
 
@@ -561,13 +575,15 @@ public class DelegatingInvocableHandler {
 
 # 消息监听器
 
-## KafkaDataListener
+## MessageListener
+
+### KafkaDataListener
 
 完整类名：`org.springframework.kafka.listener.KafkaDataListener`。
 
 它是一个标记接口，container需要通过它来判断某个对象是否实现了该接口。
 
-## GenericMessageListener
+### GenericMessageListener
 
 完整类名：`org.springframework.kafka.listener.GenericMessageListener`。
 
@@ -582,7 +598,7 @@ container中使用的自动提交offset的消息监听器的顶层接口。
 - `org.springframework.kafka.listener.MessageListener`：单条消息自动offset提交监听器接口。
 - `org.springframework.kafka.listener.BatchMessageListener`：批量消息自动offset提交监听器接口。
 
-## GenericAcknowledgingMessageListener
+### GenericAcknowledgingMessageListener
 
 完整类名：`org.springframework.kafka.listener.GenericAcknowledgingMessageListener`。
 
@@ -596,6 +612,78 @@ container中使用的手动提交offset的消息监听器的顶层接口。
 
 - `AcknowledgingMessageListener`：单条消息手动offset提交监听器接口。
 - `BatchAcknowledgingMessageListener`：批量消息手动offset提交监听器接口。
+
+## MessageListenerAdaptor
+
+### AbstractMessageListenerAdapter
+
+完整类名：`org.springframework.kafka.listener.adapter.AbstractMessageListenerAdapter`。
+
+该类是所有 `MessageListenerAdaptor` 的基类。
+
+```java
+public abstract class AbstractMessageListenerAdapter<K, V, T> implements ConsumerSeekAware {
+    protected final T delegate;
+	private final ConsumerSeekAware seekAware;
+    
+    public AbstractMessageListenerAdapter(T delegate) {
+		this.delegate = delegate;
+		if (delegate instanceof ConsumerSeekAware) {
+			this.seekAware = (ConsumerSeekAware) delegate;
+		}
+		else {
+			this.seekAware = null;
+		}
+	}
+}
+```
+
+该类实现了所有的 `ConsumerSeekAware` 接口的方法，不过都是直接委托给 `seekAware` 处理。
+
+## MessageConverter
+
+完整类名：`org.springframework.kafka.support.converter.MessageConverter`。
+
+标记接口。
+
+### RecordMessageConverter
+
+完整类名：`org.springframework.kafka.support.converter.RecordMessageConverter`。
+
+单消息转换器接口。
+
+```java
+public interface RecordMessageConverter extends MessageConverter {
+    // 将Kafka的ConsumerRecord转换成SpringMessaging中的Message
+    Message<?> toMessage(ConsumerRecord<?, ?> record, Acknowledgment acknowledgment, Type payloadType);
+    // 将SpringMessaging中的Message转换成ProducerRecord
+    ProducerRecord<?, ?> fromMessage(Message<?> message, String defaultTopic);
+}
+```
+
+这个接口有两个实现类：
+
+- `org.springframework.kafka.support.converter.MessagingMessageConverter`
+- `org.springframework.kafka.support.converter.StringJsonMessageConverter`
+
+### BatchMessageConverter
+
+完整类名：`org.springframework.kafka.support.converter.BatchMessageConverter`。
+
+批量消息转换器接口。
+
+```java
+public interface BatchMessageConverter extends MessageConverter {
+    // 将Kafka的ConsumerRecord列表转换成SpringMessaging中的Message
+    Message<?> toMessage(List<ConsumerRecord<?, ?>> records, Acknowledgment acknowledgment, Type payloadType);
+    // 将SpringMessaging中的Message转换成ProducerRecord列表
+    List<ProducerRecord<?, ?>> fromMessage(Message<?> message, String defaultTopic);
+}
+```
+
+这个接口有一个实现类：
+
+- `org.springframework.kafka.support.converter.BatchMessagingMessageConverter`
 
 # 消息监听器container
 
@@ -855,9 +943,76 @@ public interface KafkaListenerContainerFactory<C extends MessageListenerContaine
 }
 ```
 
-# 消息Converter
+### AbstractKafkaListenerContainerFactory
 
+完整类名：`org.springframework.kafka.config.AbstractKafkaListenerContainerFactory`。
 
+```java
+public abstract class AbstractKafkaListenerContainerFactory<C extends AbstractMessageListenerContainer<K, V>, K, V>
+		implements KafkaListenerContainerFactory<C>, ApplicationEventPublisherAware {
+    
+    private final ContainerProperties containerProperties =
+        new ContainerProperties((Pattern) null);
+    private ConsumerFactory<K, V> consumerFactory;
+    private Boolean autoStartup;
+	private Integer phase;
+    private MessageConverter messageConverter;
+    private ApplicationEventPublisher applicationEventPublisher;
+    private RecordFilterStrategy<K, V> recordFilterStrategy;
+    private Boolean ackDiscarded;
+	private RetryTemplate retryTemplate;
+	private RecoveryCallback<? extends Object> recoveryCallback;
+	private Boolean batchListener;
+    
+    @Override
+	public C createListenerContainer(KafkaListenerEndpoint endpoint) {
+        // 调用子类的创建KafkaListenerContainer实例
+        C instance = createContainerInstance(endpoint);
+        // 将Factory中的autoStartup、phase、applicationEventPublisher设置到KafkaListenerContainer实例中。
+        // 设置KafkaListenerContainer的bean名称
+        if (endpoint.getId() != null) {
+			instance.setBeanName(endpoint.getId());
+		}
+        // 如果endpoint为AbstractKafkaListenerEndpoint，则将Factory中的recordFilterStrategy、ackDiscarded、retryTemplate、recoveryCallback、batchListener设置到endpoint中。
+        
+        endpoint.setupListenerContainer(instance, this.messageConverter);
+		initializeContainer(instance);
+
+		return instance;
+    }
+    
+    protected abstract C createContainerInstance(KafkaListenerEndpoint endpoint);
+    
+    // 将factory#containerProperties中的属性值复制到新创建的KafkaListenerContainer#containerProperties的同名属性中
+    protected void initializeContainer(C instance) {...}
+}
+```
+
+### ConcurrentKafkaListenerContainerFactory
+
+完整类名：`org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory`。
+
+```java
+public class ConcurrentKafkaListenerContainerFactory<K, V>
+		extends AbstractKafkaListenerContainerFactory<ConcurrentMessageListenerContainer<K, V>, K, V> {
+    // 并发执行的消费者实例数
+    private Integer concurrency;
+    
+    @Override
+	protected ConcurrentMessageListenerContainer<K, V> createContainerInstance(KafkaListenerEndpoint endpoint) {
+        // 根据topicPartitions、topics 和 topicPattern 的（优先级由高到低）创建ConcurrentMessageListenerContainer实例。
+    }
+    
+    @Override
+	protected void initializeContainer(ConcurrentMessageListenerContainer<K, V> instance) {
+		super.initializeContainer(instance);
+		if (this.concurrency != null) {
+			instance.setConcurrency(this.concurrency);
+		}
+	}
+    
+}
+```
 
 # 异常处理
 
