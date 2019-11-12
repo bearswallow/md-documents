@@ -6,6 +6,12 @@
 
 ## 启动流程
 
+![MessageListener启动](SpringKafkaConsumer.assets/MessageListener启动.png)
+
+## 执行流程
+
+
+
 # 注解及处理
 
 ## 注解
@@ -326,7 +332,18 @@ public abstract class AbstractKafkaListenerEndpoint<K, V>
     private void setupMessageListener(MessageListenerContainer container, MessageConverter messageConverter) {
         // 调用子类实现方法创建MessagingMessageListenerAdapter
         Object messageListener = createMessageListener(container, messageConverter);
-        // 根据是否存在retryTemplate和recordFilterStrategy以及messageListener类型来创建不同的MessagingMessageListenerAdapter适配器。
+        // 如果存在retryTemplate，对messageListener进行包装，并重新赋值给messageListener
+        if (this.retryTemplate != null) {
+			if (messageListener instanceof AcknowledgingMessageListener) {...}
+            else {...}
+        }
+        // 如果存在recordFilterStrategy，对messageListener进行包装，并重新赋值给messageListener
+        if (this.recordFilterStrategy != null) {
+            if (messageListener instanceof AcknowledgingMessageListener){...}
+            else if (messageListener instanceof MessageListener){...}
+            else if (messageListener instanceof BatchAcknowledgingMessageListener){.}
+            else if (messageListener instanceof BatchMessageListener){...}
+        }
         // 将MessagingMessageListenerAdapter注册进MessageListenerContainer
         container.setupMessageListener(messageListener);
     }
@@ -344,6 +361,40 @@ public interface RecordFilterStrategy<K, V> {
     boolean filter(ConsumerRecord<K, V> consumerRecord);
 }
 ```
+
+#### AbstractMessageListenerAdapter
+
+完整类名：`org.springframework.kafka.listener.adapter.AbstractMessageListenerAdapter`。
+
+该类是所有 `MessageListenerAdaptor` 的基类。
+
+```java
+public abstract class AbstractMessageListenerAdapter<K, V, T> implements ConsumerSeekAware {
+    protected final T delegate;
+	private final ConsumerSeekAware seekAware;
+    
+    public AbstractMessageListenerAdapter(T delegate) {
+		this.delegate = delegate;
+		if (delegate instanceof ConsumerSeekAware) {
+			this.seekAware = (ConsumerSeekAware) delegate;
+		}
+		else {
+			this.seekAware = null;
+		}
+	}
+}
+```
+
+该类实现了所有的 `ConsumerSeekAware` 接口的方法，不过都是直接委托给 `seekAware` 处理。
+
+- `org.springframework.kafka.listener.adapter.AbstractFilteringMessageListener`
+  - `org.springframework.kafka.listener.adapter.FilteringMessageListenerAdapter`
+  - `org.springframework.kafka.listener.adapter.FilteringBatchMessageListenerAdapter`
+  - `org.springframework.kafka.listener.adapter.FilteringAcknowledgingMessageListenerAdapter`
+  - `org.springframework.kafka.listener.adapter.FilteringBatchAcknowledgingMessageListenerAdapter`
+- `org.springframework.kafka.listener.adapter.AbstractRetryingMessageListenerAdapter`
+  - `org.springframework.kafka.listener.adapter.RetryingMessageListenerAdapter`
+  - `org.springframework.kafka.listener.adapter.RetryingAcknowledgingMessageListenerAdapter`
 
 ### MethodKafkaListenerEndpoint
 
@@ -380,6 +431,152 @@ public class MethodKafkaListenerEndpoint<K, V> extends AbstractKafkaListenerEndp
     
 }
 ```
+
+#### MessageListener
+
+##### KafkaDataListener
+
+完整类名：`org.springframework.kafka.listener.KafkaDataListener`。
+
+它是一个标记接口，container需要通过它来判断某个对象是否实现了该接口。
+
+##### GenericMessageListener
+
+完整类名：`org.springframework.kafka.listener.GenericMessageListener`。
+
+```java
+public interface GenericMessageListener<T> extends KafkaDataListener<T> {
+    void onMessage(T data);
+}
+```
+
+container中使用的自动提交offset的消息监听器的顶层接口。
+
+- `org.springframework.kafka.listener.MessageListener`：单条消息自动offset提交监听器接口。
+- `org.springframework.kafka.listener.BatchMessageListener`：批量消息自动offset提交监听器接口。
+
+##### GenericAcknowledgingMessageListener
+
+完整类名：`org.springframework.kafka.listener.GenericAcknowledgingMessageListener`。
+
+```java
+public interface GenericAcknowledgingMessageListener<T> extends KafkaDataListener<T> {
+    void onMessage(T data, Acknowledgment acknowledgment);
+}
+```
+
+container中使用的手动提交offset的消息监听器的顶层接口。
+
+- `AcknowledgingMessageListener`：单条消息手动offset提交监听器接口。
+- `BatchAcknowledgingMessageListener`：批量消息手动offset提交监听器接口。
+
+#### ConsumerSeekAware
+
+完整类名：`org.springframework.kafka.listener.ConsumerSeekAware`。
+
+如果 `MessageListener` 希望在处理逻辑中可以进行offset seek操作，则需要同时实现该接口。
+
+```java
+// 可以通过ConsumerSeekCallback随机进行seek操作
+public interface ConsumerSeekAware {
+    // 注册seek回调
+    void registerSeekCallback(ConsumerSeekCallback callback);
+    // 当使用自动分配时，rebalance完成后会调用该方法
+    void onPartitionsAssigned(Map<TopicPartition, Long> assignments, 
+                              ConsumerSeekCallback callback);
+    // 如果container被设置为会触发IdleContainerEvent时，当IdleContainerEvent发布时会调用该方法
+    void onIdleContainer(Map<TopicPartition, Long> assignments,
+                         ConsumerSeekCallback callback);
+    
+    /**
+	 * A callback that a listener can invoke to seek to a specific offset.
+	 */
+	interface ConsumerSeekCallback {
+
+		/**
+		 * 将指定partition的seek操作加入consumer的seek队列中，当所有未提交的offset提交后会执行该
+		 * seek操作
+		 */
+		void seek(String topic, int partition, long offset);
+	}
+    
+}
+```
+
+#### MessagingMessageListenerAdaptor
+
+完整类名：`org.springframework.kafka.listener.adapter.MessagingMessageListenerAdapter`。
+
+```java
+public abstract class MessagingMessageListenerAdapter<K, V> implements ConsumerSeekAware {
+    // 调用方法所在的bean
+    private final Object bean;
+    // 根据方法签名推测的消息需要转换成的目标类型
+    private final Type inferredType;
+    // 实际调用方法的包装
+    private HandlerAdapter handlerMethod;
+    private boolean isConsumerRecordList;
+    private boolean isMessageList;
+    // 消息转换器
+    private RecordMessageConverter messageConverter = new MessagingMessageConverter();
+    // fallback类型
+    private Type fallbackType = Object.class;
+}
+```
+
+针对单条消息和批量消息有相应的实现：
+
+- `org.springframework.kafka.listener.adapter.RecordMessagingMessageListenerAdapter`。
+  - 实现了 `MessageListener` 和 `AcknowledgingMessageListener` 接口。
+- `org.springframework.kafka.listener.adapter.BatchMessagingMessageListenerAdapter`。
+  - 实现了 `BatchMessageListener` 和 `BatchAcknowledgingMessageListener` 接口。
+
+==如果bean实现了ConsumerSeekAware，则会将所有的ConsumerSeekAware的操作委托给bean，否则不会进行任何处理。这里的bean就是所属类或类中的方法含有 @KafkaListener 注解的SpringBean==。
+
+#### MessageConverter
+
+完整类名：`org.springframework.kafka.support.converter.MessageConverter`。
+
+标记接口。
+
+##### RecordMessageConverter
+
+完整类名：`org.springframework.kafka.support.converter.RecordMessageConverter`。
+
+单消息转换器接口。
+
+```java
+public interface RecordMessageConverter extends MessageConverter {
+    // 将Kafka的ConsumerRecord转换成SpringMessaging中的Message
+    Message<?> toMessage(ConsumerRecord<?, ?> record, Acknowledgment acknowledgment, Type payloadType);
+    // 将SpringMessaging中的Message转换成ProducerRecord
+    ProducerRecord<?, ?> fromMessage(Message<?> message, String defaultTopic);
+}
+```
+
+这个接口有两个实现类：
+
+- `org.springframework.kafka.support.converter.MessagingMessageConverter`
+- `org.springframework.kafka.support.converter.StringJsonMessageConverter`
+
+##### BatchMessageConverter
+
+完整类名：`org.springframework.kafka.support.converter.BatchMessageConverter`。
+
+批量消息转换器接口。
+
+```java
+public interface BatchMessageConverter extends MessageConverter {
+    // 将Kafka的ConsumerRecord列表转换成SpringMessaging中的Message
+    Message<?> toMessage(List<ConsumerRecord<?, ?>> records, Acknowledgment acknowledgment, Type payloadType);
+    // 将SpringMessaging中的Message转换成ProducerRecord列表
+    List<ProducerRecord<?, ?>> fromMessage(Message<?> message, String defaultTopic);
+}
+```
+
+这个接口有一个实现类：
+
+- `org.springframework.kafka.support.converter.BatchMessagingMessageConverter`
 
 ### MultiMethodKafkaListenerEndpoint
 
@@ -573,118 +770,6 @@ public class DelegatingInvocableHandler {
 
 针对 `@KafkaListener` 注解的类中多个 `@KafkaHandler` 注解的方法的包装。创建 `MessageListener` 时会创建使用该类型实例创建的 `HandlerAdaptor`。
 
-# 消息监听器
-
-## MessageListener
-
-### KafkaDataListener
-
-完整类名：`org.springframework.kafka.listener.KafkaDataListener`。
-
-它是一个标记接口，container需要通过它来判断某个对象是否实现了该接口。
-
-### GenericMessageListener
-
-完整类名：`org.springframework.kafka.listener.GenericMessageListener`。
-
-```java
-public interface GenericMessageListener<T> extends KafkaDataListener<T> {
-    void onMessage(T data);
-}
-```
-
-container中使用的自动提交offset的消息监听器的顶层接口。
-
-- `org.springframework.kafka.listener.MessageListener`：单条消息自动offset提交监听器接口。
-- `org.springframework.kafka.listener.BatchMessageListener`：批量消息自动offset提交监听器接口。
-
-### GenericAcknowledgingMessageListener
-
-完整类名：`org.springframework.kafka.listener.GenericAcknowledgingMessageListener`。
-
-```java
-public interface GenericAcknowledgingMessageListener<T> extends KafkaDataListener<T> {
-    void onMessage(T data, Acknowledgment acknowledgment);
-}
-```
-
-container中使用的手动提交offset的消息监听器的顶层接口。
-
-- `AcknowledgingMessageListener`：单条消息手动offset提交监听器接口。
-- `BatchAcknowledgingMessageListener`：批量消息手动offset提交监听器接口。
-
-## MessageListenerAdaptor
-
-### AbstractMessageListenerAdapter
-
-完整类名：`org.springframework.kafka.listener.adapter.AbstractMessageListenerAdapter`。
-
-该类是所有 `MessageListenerAdaptor` 的基类。
-
-```java
-public abstract class AbstractMessageListenerAdapter<K, V, T> implements ConsumerSeekAware {
-    protected final T delegate;
-	private final ConsumerSeekAware seekAware;
-    
-    public AbstractMessageListenerAdapter(T delegate) {
-		this.delegate = delegate;
-		if (delegate instanceof ConsumerSeekAware) {
-			this.seekAware = (ConsumerSeekAware) delegate;
-		}
-		else {
-			this.seekAware = null;
-		}
-	}
-}
-```
-
-该类实现了所有的 `ConsumerSeekAware` 接口的方法，不过都是直接委托给 `seekAware` 处理。
-
-## MessageConverter
-
-完整类名：`org.springframework.kafka.support.converter.MessageConverter`。
-
-标记接口。
-
-### RecordMessageConverter
-
-完整类名：`org.springframework.kafka.support.converter.RecordMessageConverter`。
-
-单消息转换器接口。
-
-```java
-public interface RecordMessageConverter extends MessageConverter {
-    // 将Kafka的ConsumerRecord转换成SpringMessaging中的Message
-    Message<?> toMessage(ConsumerRecord<?, ?> record, Acknowledgment acknowledgment, Type payloadType);
-    // 将SpringMessaging中的Message转换成ProducerRecord
-    ProducerRecord<?, ?> fromMessage(Message<?> message, String defaultTopic);
-}
-```
-
-这个接口有两个实现类：
-
-- `org.springframework.kafka.support.converter.MessagingMessageConverter`
-- `org.springframework.kafka.support.converter.StringJsonMessageConverter`
-
-### BatchMessageConverter
-
-完整类名：`org.springframework.kafka.support.converter.BatchMessageConverter`。
-
-批量消息转换器接口。
-
-```java
-public interface BatchMessageConverter extends MessageConverter {
-    // 将Kafka的ConsumerRecord列表转换成SpringMessaging中的Message
-    Message<?> toMessage(List<ConsumerRecord<?, ?>> records, Acknowledgment acknowledgment, Type payloadType);
-    // 将SpringMessaging中的Message转换成ProducerRecord列表
-    List<ProducerRecord<?, ?>> fromMessage(Message<?> message, String defaultTopic);
-}
-```
-
-这个接口有一个实现类：
-
-- `org.springframework.kafka.support.converter.BatchMessagingMessageConverter`
-
 # 消息监听器container
 
 ## MessageListenerContainer
@@ -720,13 +805,18 @@ public class ContainerProperties {
     private long ackTime;
     // 消息监听器
     private Object messageListener;
+    // 从kafka拉取消息的超时时间（毫秒数）
     private volatile long pollTimeout = 1000;
+    // 消费者任务执行器，实际的消息拉取会提交到该执行器中的线程执行
     private AsyncListenableTaskExecutor consumerTaskExecutor;
+    // 消息监听器执行器，实际的消息消费会在该执行器中的线程中执行
     private AsyncListenableTaskExecutor listenerTaskExecutor;
     // 异常处理器
     private GenericErrorHandler<?> errorHandler;
+    // pauseAfter和pauseEnabled这两个配置项是为了让处理缓慢的消息费不会触发rebalance
     private long pauseAfter = DEFAULT_PAUSE_AFTER;
     private boolean pauseEnabled = true;
+    // 客户端能够缓存的从Kafka拉取的消息批次
     private int queueDepth = DEFAULT_QUEUE_DEPTH;
     // 关闭超时时间（毫秒）
     private long shutdownTimeout = DEFAULT_SHUTDOWN_TIMEOUT;
@@ -737,7 +827,9 @@ public class ContainerProperties {
     private OffsetCommitCallback commitCallback;
     // 是否同步提交Offset
     private boolean syncCommits = true;
+    // 消息消费抛出异常时是否进行ack
     private boolean ackOnError = true;
+    // 消费者IdleEvent产生间隔
     private Long idleEventInterval;
 }
 ```
@@ -773,6 +865,49 @@ public abstract class AbstractMessageListenerContainer<K, V>
 ```
 
 - 实现了 `SmartLifecycle` 接口，所以可以对其进行控制：start、stop等操作。
+
+### ConcurrentMessageListenerContainer
+
+完整类名：`org.springframework.kafka.listener.ConcurrentMessageListenerContainer`。
+
+```java
+public class ConcurrentMessageListenerContainer<K, V> extends AbstractMessageListenerContainer<K, V> {
+    // KafkaConsumer工厂
+    private final ConsumerFactory<K, V> consumerFactory;
+    // 根据concurrency来生成多个KafkaMessageListenerContainer实例
+	private final List<KafkaMessageListenerContainer<K, V>> containers = new ArrayList<>();
+    // 并发数
+    private int concurrency = 1;
+    
+    // 方法体中的逻辑执行的前提是isRunning()返回false
+    @Override
+	protected void doStart() {
+        // 如果是直接分配partition的方式，则要调整concurrency的值，让其不能大于分配的partition的数量。多于partition的数量也是浪费。
+        for (int i = 0; i < this.concurrency; i++) {
+            KafkaMessageListenerContainer<K, V> container;
+            // 根据是否为直接分配方式来创建不同的KafkaMessageListenerContainer实例
+            if (topicPartitions == null) {
+                container = new KafkaMessageListenerContainer<>(this.consumerFactory, containerProperties);
+            }
+            else {
+                // 每一个KafkaMessageListenerContainer实例只负责处理分配partition的一部分，达到负载的目的。
+                container = new KafkaMessageListenerContainer<>(this.consumerFactory, containerProperties, partitionSubset(containerProperties, i));
+            }
+            if (getBeanName() != null) {
+                container.setBeanName(getBeanName() + "-" + i);
+            }
+            if (getApplicationEventPublisher() != null) {
+                container.setApplicationEventPublisher(getApplicationEventPublisher());
+            }
+            container.setClientIdSuffix("-" + i);
+            // 启动KafkaMessageListenerContainer
+            container.start();
+            // 将该KafkaMessageListenerContainer加入列表，以便在doStop时可以关闭所有的KafkaMessageListenerContainer。
+            this.containers.add(container);
+        }
+    }
+}
+```
 
 ### KafkaMessageListenerContainer
 
@@ -828,8 +963,13 @@ private final class ListenerConsumer implements SchedulingAwareRunnable, Consume
     private final AcknowledgingMessageListener<K, V> acknowledgingMessageListener;
     private final BatchMessageListener<K, V> batchListener;
     private final BatchAcknowledgingMessageListener<K, V> batchAcknowledgingMessageListener;
+    
+    
     // 是否批量消息监听器，根据theListener的类型不同赋值。
     private final boolean isBatchListener;
+    // 来自于KafkaConsumer的配置项enable.auto.commit的值，如果autoCommit为true则会在KafkaConsumer中的某个后台线程中按照一定时间间隔（auto.commit.interval.ms）进行ack
+    private final boolean autoCommit = 
+        KafkaMessageListenerContainer.this.consumerFactory.isAutoCommit();
     
     // 异常处理器
     private final ErrorHandler errorHandler;
@@ -841,16 +981,23 @@ private final class ListenerConsumer implements SchedulingAwareRunnable, Consume
 				: new LoggingCommitCallback();
     // KafkaClient中的Consumer对象，通过ConsumerFactory创建
     private final Consumer<K, V> consumer;
-    // 分配给该消息监听器container的partition，以及每个partition的当前offset
+    // 显式分配给该消息监听器container的partition，以及每个partition的当前offset
     private volatile Map<TopicPartition, OffsetMetadata> definedPartitions;
+    // 自动分配给该消费者的partition集合
     private volatile Collection<TopicPartition> assignedPartitions;
     
-    
+    // 待提交的offset映射，一般都是从acks中不断获取消息后更新相应partition的待提交的offset
     private final Map<String, Map<Integer, Long>> offsets = new HashMap<>();
+    // 从KafkaConsumer拉取的消息会先存入该阻塞队列（容量由ContainerProperties#queueDepth控制，默认为1）
     private final BlockingQueue<ConsumerRecords<K, V>> recordsToProcess =
 				new LinkedBlockingQueue<>(this.containerProperties.getQueueDepth());
-    private final BlockingQueue<ConsumerRecord<K, V>> acks = new LinkedBlockingQueue<>();
-    private final BlockingQueue<TopicPartitionInitialOffset> seeks = new LinkedBlockingQueue<>();
+    // 当offset的提交模式不为MANUAL、MANUAL_IMMEDIATE且autoCommit为false时需要将待ack的消息存放在该阻塞队列中。
+    private final BlockingQueue<ConsumerRecord<K, V>> acks =
+        new LinkedBlockingQueue<>();
+    // 待重新定位的partition阻塞队列
+    private final BlockingQueue<TopicPartitionInitialOffset> seeks =
+        new LinkedBlockingQueue<>();
+    // 保存从kafka拉取回来后未存入recordsToProcess的消息
     private ConsumerRecords<K, V> unsent;
     private int count;
     private long last;
@@ -884,6 +1031,60 @@ ListenerConsumer(GenericMessageListener<?> listener, GenericAcknowledgingMessage
 }
 ```
 
+##### createRebalanceListener
+
+```java
+public ConsumerRebalanceListener createRebalanceListener(final Consumer<K, V> consumer) {
+    return new ConsumerRebalanceListener() {
+        // fetch停止后，rebalance开始之前会调用该回调
+        @Override
+        public void onPartitionsRevoked(Collection<TopicPartition> partitions) {
+            // 如果KafkaConsumer不会自动进行ack
+            if (!ListenerConsumer.this.autoCommit) {
+                // 如果消息处理线程已经启动则将其停止，且清空未消费的消息和unsent
+                if (ListenerConsumer.this.listenerInvokerFuture != null) {
+                    stopInvoker();
+                    ListenerConsumer.this.recordsToProcess.clear();
+                    ListenerConsumer.this.unsent = null;
+                }
+            }
+
+            getContainerProperties().getConsumerRebalanceListener()
+                .onPartitionsRevoked(partitions);
+            // relance前将所有未提交的offset提交到kafka
+            commitManualAcks();
+        }
+
+        // rebalance完成之后会调用该回调
+        @Override
+        public void onPartitionsAssigned(Collection<TopicPartition> partitions) {
+            // 记录分配给当前消费者的partition集合
+            ListenerConsumer.this.assignedPartitions = partitions;
+            if (!ListenerConsumer.this.autoCommit) {
+                // 将分配的partition集合在当前consumer中的offset提交到kafka中
+            }
+            
+            // 如果MessageListener所在的bean也实现了ConsumerSeekAware接口，则调用bean的onPartitionsAssigned方法
+            if (ListenerConsumer.this.theListener instanceof ConsumerSeekAware) {
+                seekPartitions(partitions, false);
+            }
+            // rebalance完成后，如果当前消费者还在运行中且分配的partition不为空，则需要重新启动消息消费线程
+            if (!ListenerConsumer.this.autoCommit
+                && KafkaMessageListenerContainer.this.isRunning()
+                && !CollectionUtils.isEmpty(partitions)) {
+                startInvoker();
+            }
+            getContainerProperties().getConsumerRebalanceListener()
+                .onPartitionsAssigned(partitions);
+        }
+    }
+}
+```
+
+###### ==有疑问的地方==
+
+- 在完成重新分配时，为什么要将分配的partition集合在当前consumer中的offset提交到kafka中？
+
 ##### run方法
 
 ```java
@@ -891,10 +1092,275 @@ ListenerConsumer(GenericMessageListener<?> listener, GenericAcknowledgingMessage
 public void run() {
     this.count = 0;
     this.last = System.currentTimeMillis();
+    
+    // 运行模式为手动分配partitions模式时，手动触发初始化partition offset
+    if (isRunning() && this.definedPartitions != null) {
+        initPartitionsIfNeeded();
+        // 如果不是自动提交offset，则启动消息消费线程，从recordsToProcess中不断的拉取消息进行消费，然后调用MessageListener进行消费。
+        if (!this.autoCommit) {
+            startInvoker();
+        }
+    }
+    
+    // 上次从kafka拉取消息的时间
+    long lastReceive = System.currentTimeMillis();
+    // 上次发布ListenerContainerIdleEvent事件的时间
+    long lastAlertAt = lastReceive;
+    while (isRunning()) {
+        try {
+            // 如果offset不会自动提交，则将未提交的消息的offset提交到kafka
+            if (!this.autoCommit) {
+                processCommits();
+            }
+            // 执行seek，将需要重新定位的partition的offset设置为指定值
+            processSeeks();
+            // 从KafkaConsumer拉取消息
+            ConsumerRecords<K, V> records = 
+                this.consumer.poll(this.containerProperties.getPollTimeout());
+            
+            if (records != null && records.count() > 0) {
+                // 刷新Idle的起始时间
+                if (this.containerProperties.getIdleEventInterval() != null) {
+                    lastReceive = System.currentTimeMillis();
+                }
+                // 如果autoCommit为true，则直接在该线程中调用MessageListener进行消息消费
+                if (this.autoCommit) {
+                    invokeListener(records);
+                }
+                else {
+                    // 将本次拉取的消息保存到recordsToProcess中，
+                    if (sendToListener(records)) {
+                        if (this.assignedPartitions != null) {
+                            // avoid group management rebalance due to a slow
+                            // consumer
+                            this.consumer.pause(this.assignedPartitions);
+                            this.paused = true;
+                            this.unsent = records;
+                        }
+                    }
+                }
+            }
+            else {
+                if (this.containerProperties.getIdleEventInterval() != null) {
+                    // 判断是否需要触发ListenerContainerIdleEvent事件，如果需要则发布该事件,刷新lastAlertAt
+                    // 如果MessageListener所在bean实现了ConsumerSeekAware接口，则调用bean的onIdleContainer方法
+                }
+            }
+            
+            this.unsent = checkPause(this.unsent);
+        }
+        catch (WakeupException e) {
+            this.unsent = checkPause(this.unsent);
+        }
+        catch (Exception e) {
+            // 如果存在ErrorHandler则委托给ErrorHandler处理
+            if (this.containerProperties.getGenericErrorHandler() != null) {
+                this.containerProperties.getGenericErrorHandler().handle(e, null);
+            }
+        }
+    }
+    
+    // 下面的清理工作
+    if (this.listenerInvokerFuture != null) {
+        stopInvoker();
+        commitManualAcks();
+    }
+    try { this.consumer.unsubscribe(); } catch (WakeupException e) { }
+    this.consumer.close();
+}
+```
+
+##### checkPause
+
+```java
+private ConsumerRecords<K, V> checkPause(ConsumerRecords<K, V> unsent) {
+    // 当消费者处于暂停状态时，如果recordsToProcess里的数量少于设定的容量
+    if (this.paused && this.recordsToProcess.size() < 
+        this.containerProperties.getQueueDepth()) {
+        // 重新恢复consumer的执行
+        this.consumer.resume(this.assignedPartitions);
+        this.paused = false;
+        if (unsent != null) {
+            // 将未存入recordsToProcess的消息重新存入该阻塞队列
+            sendToListener(unsent);
+        }
+    }
 }
 ```
 
 
+
+##### invokeRecordListener
+
+```java
+private void invokeRecordListener(final ConsumerRecords<K, V> records) {
+    Iterator<ConsumerRecord<K, V>> iterator = records.iterator();
+    // 遍历所有消息进行处理。
+    while (iterator.hasNext() && (this.autoCommit || (this.invoker != null && this.invoker.active))) {
+        try {
+            // 核心代码
+            if (this.acknowledgingMessageListener != null) {
+                this.acknowledgingMessageListener.onMessage(record,
+                                                            this.isAnyManualAck
+                                                            ? new ConsumerAcknowledgment(record, this.isManualImmediateAck)
+                                                            : null);
+            }
+            else {
+                this.listener.onMessage(record);
+            }
+
+            // 如果不是自动提交而且也不会在MessageListener中手动提交offset，则需要将消息加入到待提交的ack阻塞队列中，等待异步提交。
+            if (!this.isAnyManualAck && !this.autoCommit) {
+                this.acks.add(record);
+            }
+        }
+        catch (Exception e) {
+            // 如果ackOnError为true且不会自动提交，则将消息加入到待提交的ack阻塞队列中
+            if (this.containerProperties.isAckOnError() && !this.autoCommit) {
+                this.acks.add(record);
+            }
+            // 将异常委托给ErrorHandler处理
+            this.errorHandler.handle(e, record);
+        }
+    }
+}
+```
+
+###### ==有疑问的地方==
+
+- `this.autoCommit || (this.invoker != null && this.invoker.active)` 这个判断的作用是什么？
+- `invokeBatchListener` 的处理逻辑与 `invokeRecordListener` 一样。
+
+##### processCommits
+
+```java
+private void processCommits() {
+    handleAcks();
+}
+```
+
+##### sendToListener
+
+```java
+private boolean sendToListener(final ConsumerRecords<K, V> records) throws InterruptedException {
+    if (this.containerProperties.isPauseEnabled() &&
+        CollectionUtils.isEmpty(this.definedPartitions)) {
+        return !this.recordsToProcess.offer(records,
+                                            this.containerProperties.getPauseAfter(),
+                                            TimeUnit.MILLISECONDS);
+    }
+    else {
+        this.recordsToProcess.put(records);
+        return false;
+    }
+}
+```
+
+##### commitIfNecessary
+
+```java
+private void commitIfNecessary() {
+    Map<TopicPartition, OffsetAndMetadata> commits = new HashMap<>();
+    // 将offsets中待提交的offset全部生成OffsetAndMetadata加入到commits中
+    this.offsets.clear();
+    if (!commits.isEmpty()) {
+        try {
+            // 根据ContainerProperties#syncCommits来执行offset的同步提交或异步提交
+            if (this.containerProperties.isSyncCommits()) {
+                this.consumer.commitSync(commits);
+            }
+            else {
+                this.consumer.commitAsync(commits, this.commitCallback);
+            }
+        }
+        catch (WakeupException e) {
+        }
+    }
+}
+```
+
+##### processSeeks
+
+```java
+private void processSeeks() {
+    TopicPartitionInitialOffset offset = this.seeks.poll();
+    while (offset != null) {
+        this.consumer.seek(offset.topicPartition(), offset.initialOffset());
+        offset = this.seeks.poll();
+    }
+}
+```
+
+
+
+##### ==有疑问的地方==
+
+- `ContainerProperties#pauseEnabled` 的作用是什么？
+
+#### ListenerInvoker
+
+完整类名：`org.springframework.kafka.listener.KafkaMessageListenerContainer.ListenerConsumer.ListenerInvoker`。
+
+```java
+private final class ListenerInvoker implements SchedulingAwareRunnable {
+    // 是否继续执行的标识
+    private volatile boolean active = true;
+    // 执行任务的当前线程
+    private volatile Thread executingThread;
+    
+    @Override
+    public void run() {
+        try {
+            this.executingThread = Thread.currentThread();
+            while (this.active) {
+                // 核心代码，不断的从recordsToProcess中拉取已经从kafka获取到的消息，调用MessageListener进行处理。
+                ConsumerRecords<K, V> records =
+                    ListenerConsumer.this.recordsToProcess.poll(1, TimeUnit.SECONDS);
+                if (records != null) {
+                    invokeListener(records);
+                }
+            }
+        }
+        finally {
+            this.active = false;
+            this.exitLatch.countDown();
+        }
+    }
+}
+```
+
+该独立的线程会不断的从 `recordsToProcess` 中拉取已经从 `kafka` 获取到的消息，调用 `MessageListener` 进行处理。
+
+`invokeListener` 方法中会根据 `MessageListener` 的类型不同调用 `ListenerConsumer#invokeRecordListener` 或 `ListenerConsumer#invokeBatchListener`。
+
+#### ConsumerAcknowledgment
+
+完整类名：`org.springframework.kafka.listener.KafkaMessageListenerContainer.ListenerConsumer.ConsumerAcknowledgment`。
+
+```java
+private final class ConsumerAcknowledgment implements Acknowledgment {
+    private final ConsumerRecord<K, V> record;
+    private final boolean immediate;
+    
+    @Override
+    public void acknowledge() {
+        try {
+            // 将消息加入待ack的阻塞队列中
+            ListenerConsumer.this.acks.put(this.record);
+        }
+        catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new KafkaException("Interrupted while queuing ack for " + this.record, e);
+        }
+        if (this.immediate) {
+            // 这一步骤的作用不明？
+            ListenerConsumer.this.consumer.wakeup();
+        }
+    }
+}
+```
+
+`ConsumerBatchAcknowledgment` 的实现逻辑与 `ConsumerAcknowledgment` 的相同。
 
 ## ConsumerFactory
 
@@ -929,6 +1395,13 @@ public class DefaultKafkaConsumerFactory<K, V> implements ConsumerFactory<K, V>,
     
     protected KafkaConsumer<K, V> createKafkaConsumer(Map<String, Object> configs) {
 		return new KafkaConsumer<K, V>(configs, this.keyDeserializer, this.valueDeserializer);
+	}
+    
+    @Override
+	public boolean isAutoCommit() {
+		Object auto = this.configs.get(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG);
+		return auto instanceof Boolean ? (Boolean) auto
+				: auto instanceof String ? Boolean.valueOf((String) auto) : true;
 	}
 }
 ```
@@ -1014,9 +1487,9 @@ public class ConcurrentKafkaListenerContainerFactory<K, V>
 }
 ```
 
-# 异常处理
+## 异常处理
 
-## GenericErrorHandler
+### GenericErrorHandler
 
 完整类名：`org.springframework.kafka.listener.GenericErrorHandler`。
 

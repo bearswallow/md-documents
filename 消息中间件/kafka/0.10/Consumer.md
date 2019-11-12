@@ -567,3 +567,7 @@ public interface PartitionAssignor {
 }
 ```
 
+# ==有疑问的地方==
+
+- `KafkaConsumer#wakeup` 的作用是什么？
+
