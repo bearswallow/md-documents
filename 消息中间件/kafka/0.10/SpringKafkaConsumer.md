@@ -8,10 +8,6 @@
 
 ![MessageListener启动](SpringKafkaConsumer.assets/MessageListener启动.png)
 
-## 执行流程
-
-
-
 # 注解及处理
 
 ## 注解
@@ -999,13 +995,16 @@ private final class ListenerConsumer implements SchedulingAwareRunnable, Consume
         new LinkedBlockingQueue<>();
     // 保存从kafka拉取回来后未存入recordsToProcess的消息
     private ConsumerRecords<K, V> unsent;
+    // 待ack的消息条数，用于AckMode.COUNT和AckMode.COUNT_TIME模式下判断是否需要提交offset
     private int count;
+    // 上次offset的提交时间，用于AckMode.TIME和AckMode.COUNT_TIME模式下判断是否需要提交offset
     private long last;
     // 是否已暂停
     private boolean paused;
     
-    
+    // 消息消费线程
     private volatile ListenerInvoker invoker;
+    // 消息消费线程执行返回的Future
     private volatile Future<?> listenerInvokerFuture;
 }
 ```
@@ -1013,7 +1012,8 @@ private final class ListenerConsumer implements SchedulingAwareRunnable, Consume
 ##### 构造函数
 
 ```java
-ListenerConsumer(GenericMessageListener<?> listener, GenericAcknowledgingMessageListener<?> ackListener) {
+ListenerConsumer(GenericMessageListener<?> listener,
+                 GenericAcknowledgingMessageListener<?> ackListener) {
     // 根据consumerFactory是否实现了ClientIdSuffixAware使用不同的方式创建KafkaClient的Consumer实例。
     final Consumer<K, V> consumer = ...;
     // 以listener为主
@@ -1041,7 +1041,7 @@ public ConsumerRebalanceListener createRebalanceListener(final Consumer<K, V> co
         public void onPartitionsRevoked(Collection<TopicPartition> partitions) {
             // 如果KafkaConsumer不会自动进行ack
             if (!ListenerConsumer.this.autoCommit) {
-                // 如果消息处理线程已经启动则将其停止，且清空未消费的消息和unsent
+                // 如果消息处理线程已经启动则将其停止，且清空未消费的消息和未保存到recordsToProcess中的消息
                 if (ListenerConsumer.this.listenerInvokerFuture != null) {
                     stopInvoker();
                     ListenerConsumer.this.recordsToProcess.clear();
@@ -1131,10 +1131,11 @@ public void run() {
                     // 将本次拉取的消息保存到recordsToProcess中，
                     if (sendToListener(records)) {
                         if (this.assignedPartitions != null) {
-                            // avoid group management rebalance due to a slow
-                            // consumer
+                            // 如果保存到recordsToProcess失败，说明消费速度太慢，无法正常保持从kafka拉取数据的频率，
+                            // 为了防止groupCoordinator误以为该consumer已经无法响应而触发rebalance，需要将consumer暂停。
                             this.consumer.pause(this.assignedPartitions);
                             this.paused = true;
+                            // 将保存到recordsToProcess失败的消息暂存在unsent中
                             this.unsent = records;
                         }
                     }
@@ -1174,7 +1175,7 @@ public void run() {
 
 ```java
 private ConsumerRecords<K, V> checkPause(ConsumerRecords<K, V> unsent) {
-    // 当消费者处于暂停状态时，如果recordsToProcess里的数量少于设定的容量
+    // 当消费者处于暂停状态且recordsToProcess里的数量少于设定的容量时，说明消费者的消费速度可以赶上了，就会恢复consumer的执行，并将unsent中的消息重新保存到recordsToProcess
     if (this.paused && this.recordsToProcess.size() < 
         this.containerProperties.getQueueDepth()) {
         // 重新恢复consumer的执行
@@ -1184,11 +1185,11 @@ private ConsumerRecords<K, V> checkPause(ConsumerRecords<K, V> unsent) {
             // 将未存入recordsToProcess的消息重新存入该阻塞队列
             sendToListener(unsent);
         }
+        return null;
     }
+    return unsent;
 }
 ```
-
-
 
 ##### invokeRecordListener
 
@@ -1235,9 +1236,69 @@ private void invokeRecordListener(final ConsumerRecords<K, V> records) {
 
 ```java
 private void processCommits() {
+    // 处理ack
     handleAcks();
+    this.count += this.acks.size();
+    long now;
+    AckMode ackMode = this.containerProperties.getAckMode();
+    // 处理AckMode.COUNT、AckMode.TIME和AckMode.COUNT_TIME模式的offset提交
+    // 重置this.count和this.last
 }
 ```
+
+###### ==有疑问的地方==
+
+- 为什么在执行 `this.count += this.acks.size()` 之前先调用 `handleAcks()`？这样的话 `this.acks.size()` 不是一直都是0吗。
+
+##### handleAcks
+
+遍历所有待ack的消息，进行处理。
+
+```java
+private void handleAcks() {
+    ConsumerRecord<K, V> record = this.acks.poll();
+    while (record != null) {
+        processAck(record);
+        record = this.acks.poll();
+    }
+}
+```
+
+如果isManualImmediateAck为true，则立即调用consumer的commit(同步或异步)进行提交。
+
+```java
+private void processAck(ConsumerRecord<K, V> record) {
+    if (ListenerConsumer.this.isManualImmediateAck) {
+        try {
+            ackImmediate(record);
+        }
+        catch (WakeupException e) { }
+    }
+    else {
+        addOffset(record);
+    }
+}
+```
+
+否则，更新offsets中相应的partition的offset。
+
+```java
+private void addOffset(ConsumerRecord<K, V> record) {
+    if (!this.offsets.containsKey(record.topic())) {
+        this.offsets.put(record.topic(), new HashMap<Integer, Long>());
+    }
+
+    Map<Integer, Long> highestOffsetMap = this.offsets.get(record.topic());
+    Long offset = highestOffsetMap.get(record.partition());
+
+    // 当record的offset比offsets中已存在的相应partition的offset大时，更新该partition的offset
+    if (offset == null || record.offset() > offset) {
+        highestOffsetMap.put(record.partition(), record.offset());
+    }
+}
+```
+
+
 
 ##### sendToListener
 
