@@ -1201,10 +1201,7 @@ private void invokeRecordListener(final ConsumerRecords<K, V> records) {
         try {
             // 核心代码
             if (this.acknowledgingMessageListener != null) {
-                this.acknowledgingMessageListener.onMessage(record,
-                                                            this.isAnyManualAck
-                                                            ? new ConsumerAcknowledgment(record, this.isManualImmediateAck)
-                                                            : null);
+                this.acknowledgingMessageListener.onMessage(record, this.isAnyManualAck ? new ConsumerAcknowledgment(record, this.isManualImmediateAck) : null);
             }
             else {
                 this.listener.onMessage(record);
